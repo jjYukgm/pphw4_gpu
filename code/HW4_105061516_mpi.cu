@@ -1,15 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda_runtime.h>
+#include <mpi.h>
 
 const int INF = 10000000;
-const int V = 10010;
+//const int V = 10010;
 void input(char *inFileName);
 void output(char *outFileName);
 
 void block_FW();
 int ceil(int a, int b);
-void callP1(int r);
+void callP1(int round);
 void callP2(int r, 
 int *block_start_x, int *block_start_y, 
 int *block_height, int *block_width);
@@ -18,54 +19,85 @@ __global__ void cal_Ptwo(int* Dist_ij, int* Dist_ik, int* Dist_kj);
 
 
 int n, m, B;	// Number of vertices, edges
-static int Dist[V][V];
+int rank, size;
+//static int Dist[V *V];
+int *Dist;
+MPI_Win win;
 //int* Dist;
 
 int main(int argc, char* argv[])
 {
-	cudaSetDevice(0);
-	input(argv[1]);
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);//rank = ver_id - 1
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+	
+	cudaSetDevice(rank%2);
+	if(rank ==0)
+		input(argv[1]);
+	MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD);
+	if(rank ==0){
+		MPI_Win_create(Dist, n *n *sizeof(int), sizeof(int), MPI_INFO_NULL,    
+			MPI_COMM_WORLD, &win);
+		//MPI_Win_fence((MPI_MODE_NOPUT | MPI_MODE_NOPRECEDE), win);
+		//MPI_Win_fence(MPI_MODE_NOSUCCEED, win);
+		
+	}
+	else{
+		//printf("[%d] n: %d\n", rank, n);
+		
+		MPI_Win_create(NULL, 0, 1, MPI_INFO_NULL, MPI_COMM_WORLD, &win);// MPI_BOTTOM
+		/* it works!!
+		int tt = 0;
+		int tt2 = 0;
+		MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
+		MPI_Get(&tt, 1, MPI_INT, 0, rank, 1, MPI_INT, win);
+		MPI_Get(&tt2, 1, MPI_INT, 0, n, 1, MPI_INT, win);
+		MPI_Win_unlock(0, win);
+		printf("[%d] get: %d, %d\n", rank, tt, tt2);
+		//*/
+		/* useless
+		MPI_Win_fence(MPI_MODE_NOPRECEDE, win);
+		MPI_Win_fence((MPI_MODE_NOSTORE | MPI_MODE_NOSUCCEED), win);
+		//*/
+	}
+	
+	
 	B = atoi(argv[3]);
 	if(B < 1)
 		B = 1;
-	else if(B > 32)
+	else if(B > 32)// B^2 < max thread == 1024 
 		B = 32;
-	/*
-	cudaDeviceProp prop;
-    if(cudaGetDeviceProperties(&prop, 0) == cudaSuccess) 
-	{
-    	printf("cuda version = %d \n" , prop.major ) ;
-		printf("maxThreadsPerBlock = %d \n" , prop.maxThreadsPerBlock ) ;
-		printf("totalGlobalMem = %d \n" , prop.totalGlobalMem ) ;
-		printf(" maxThreadsDim[3] = %d, %d, %d\n" , prop.maxThreadsDim[1], prop.maxThreadsDim[2] , prop.maxThreadsDim[3] ) ;
-		printf(" maxGridSize[3] = %d, %d, %d\n" , prop.maxGridSize[1] , prop.maxGridSize[2] , prop.maxGridSize[3] ) ;
-    }
-	//cuda version: 2
-	//maxThreadsPerBlock: 1024
-	//totalGlobalMem: 2066153472
-	//maxThreadsDim: 1024, 64, 65535
-	//maxGridSize: 65535, 65535, 1301000
-	//*/
 	block_FW();
 	
-	
-	output(argv[2]);
+	//printf("[%d]This is out BF\n", rank);
+	if(rank == 0)
+		output(argv[2]);
 	
 
+	//MPI_Barrier( MPI_COMM_WORLD );
+	MPI_Win_fence(0, win);
+	//printf("[%d]This MPI_Win_free\n", rank);
+	MPI_Win_free(&win);
+	//printf("[%d]This if(rank ==0)\n", rank);
+	if(rank ==0)
+		MPI_Free_mem(Dist);
+	//printf("[%d]This MPI_Finalize\n", rank);
+	MPI_Finalize();
 	return 0;
 }
 
 void input(char *inFileName)
 {
+	
 	FILE *infile = fopen(inFileName, "r");
 	fscanf(infile, "%d %d", &n, &m);
-	
+	MPI_Alloc_mem(n *n * sizeof(int), MPI_INFO_NULL, &Dist);
 	
 
 	for (int i = 0; i < n; ++i) {
 		for (int j = 0; j < n; ++j) {
-			if (i == j)	Dist[i][j] = 0;
-			else		Dist[i][j] = INF;
+			if (i == j)	Dist[i *n +j] = 0;
+			else		Dist[i *n +j] = INF;
 		}
 	}
 
@@ -73,7 +105,7 @@ void input(char *inFileName)
 		int a, b, v;
 		fscanf(infile, "%d %d %d", &a, &b, &v);
 		--a, --b;
-		Dist[a][b] = v;
+		Dist[a *n +b] = v;
 	}
 }
 
@@ -82,8 +114,8 @@ void output(char *outFileName)
 	FILE *outfile = fopen(outFileName, "w");
 	for (int i = 0; i < n; ++i) {
 		for (int j = 0; j < n; ++j) {
-			if (Dist[i][j] >= INF)	fprintf(outfile, "INF ");
-			else					fprintf(outfile, "%d ", Dist[i][j]);
+			if (Dist[i *n +j] >= INF)	fprintf(outfile, "INF ");
+			else					fprintf(outfile, "%d ", Dist[i *n +j]);
 		}
 		fprintf(outfile, "\n");
 	}		
@@ -98,15 +130,14 @@ void block_FW()
 {
 	int round = ceil(n, B);
 	
-	
-	for (int r = 0; r < round; ++r) {
+	//MPI_Barrier(MPI_COMM_WORLD);
+	int r;
+	for(r = 0; r < round; ++r){
 		/* Phase 1*/
-		//printf("[%d]This is callP1\n", r);
-		callP1(r);
-		
-		
+		if(rank ==0)
+			callP1(r);
 		/* Phase 2*/
-		//printf("This is Phase 2\n");
+		//printf("[%d][%d]This is Phase 2\n", rank, r);
 		int block_start_x[4] = {r,		r, 0,	r + 1};
 		int block_start_y[4] = {0,	r + 1, r,		r};
 		int block_height[4] = {1, 				1, r,	round - r - 1};
@@ -114,7 +145,7 @@ void block_FW()
 		callP2(r, block_start_x, block_start_y,
 			block_height, block_width);
 		/* hase 3*/
-		//printf("This is Phase 3\n");
+		//printf("[%d][%d]This is Phase 3\n", rank, r);
 		int block_start_x2[4] = {0, 	0,	r + 1, r + 1};
 		int block_start_y2[4] = {0,	r + 1,		0, r + 1};
 		int block_height2[4] = {r, r,	round - r -1,	round - r -1};
@@ -123,7 +154,59 @@ void block_FW()
 			block_height2, block_width2);
 		//printf("End one turn\n");
 	}
+	/* Phase 1*/
+	callP1(round);
 
+}
+
+void putDistInArray(int round, int bias_x, int bias_y, 
+	int block_height, int block_width,
+	int* Dist_ij, int* Dist_ik, int* Dist_kj){
+		
+	int shm_size = sizeof(int) * B * B;
+	cudaError_t err = cudaMallocHost(&Dist_ij, shm_size * block_height * block_width);
+	if (err != 0)	printf("malloc Dist_ij error\n");
+	err = cudaMallocHost(&Dist_ik, shm_size * block_height);
+	if (err != 0)	printf("malloc Dist_ik error\n");
+	err = cudaMallocHost(&Dist_kj, shm_size * block_width);
+	if (err != 0)	printf("malloc Dist_kj error\n");
+	int ktmp, itmp, jtmp, j, k;
+	int kbias = round * B;
+	int end_x = block_height * B;
+	int end_y = block_width * B;
+	bias_x *= B;
+	bias_y *= B;
+	//為何要重新歷過一遍?比原本的還慢!!
+	//因要解決IO問題，不想直接IO全部
+	//真的有比較差??不是被"資源利用率"騙到?(IO全部VS處理完再IO部分)
+	for(int i = 0; i < end_x; ++i){
+		itmp = bias_x + i;
+		if(itmp >= n)
+			itmp = n - 1;
+		for(j = 0; j < end_y; ++j){
+			jtmp = bias_y + j;
+			if(jtmp >= n)
+				jtmp = n - 1;
+			Dist_ij[i * end_y + j] = Dist[itmp *n +jtmp];
+		}
+		for(k = 0; k < B; ++k){
+			ktmp = k + kbias;
+			if(ktmp >= n)
+				ktmp = n - 1;
+			Dist_ik[i * B + k] = Dist[itmp *n +ktmp];
+		}
+	}
+	for(int k = 0; k < B; ++k){
+		ktmp = k + kbias;
+		if(ktmp >= n)
+			ktmp = n - 1;
+		for(int j = 0; j < end_y; ++j){
+			jtmp = bias_y + j;
+			if(jtmp >= n)
+				jtmp = n - 1;
+			Dist_kj[k * end_y + j] = Dist[ktmp *n +jtmp];
+		}
+	}
 }
 void putInAij(int bias_y, int* Dist_ij){
 		
@@ -140,23 +223,35 @@ void putInAij(int bias_y, int* Dist_ij){
 	if(bias_y + jlen > n)
 		jlen = n - bias_y;
 	// part 1: <, <
-	for(i = 0; i < jlen; ++i){
-		itmp = bias_y + i;
-		for(j = 0; j < jlen; ++j){
-			jtmp = bias_y + j;
-			Dist_ij[i * B + j] = Dist[itmp][jtmp];
+	if(rank ==0){
+		MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
+		for(i = 0; i < jlen; ++i){
+			itmp = (bias_y + i)*n +bias_y;
+			for(j = 0; j < jlen; ++j)
+				Dist_ij[i * B + j] = Dist[itmp +j];
+		}
+		MPI_Win_unlock(0, win);
+	}
+	else{
+		for(i = 0; i < jlen; ++i){
+			itmp = (bias_y + i) *n +bias_y;
+			MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
+			MPI_Get(Dist_ij + i *B, jlen, MPI_INT, 0, itmp , jlen, MPI_INT, win);
+			MPI_Win_unlock(0, win);
 		}
 	}
+	if( jlen == bias_y)
+		return;
 	itmp = (jlen -1) * B;
 	// part 3: >, <=
 	for(i = jlen; i < B; ++i)
 		for(j = 0; j < jlen; ++j)
 			Dist_ij[i * B + j] = Dist_ij[itmp + j];
 	// part 2: >, >
-	jtmp += jlen -1;//(jlen -1) *B + (jlen -1);
+	itmp += jlen -1;//(jlen -1) *B + (jlen -1);
 	for(i = jlen; i < B; ++i)
 		for(j = jlen; j < B; ++j)
-			Dist_ij[i * B + j] = Dist_ij[jtmp];
+			Dist_ij[i * B + j] = Dist_ij[itmp];
 	// part 4: <=, >
 	jtmp = (jlen -1);
 	for(i = 0; i < jlen; ++i){
@@ -192,28 +287,41 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 	if(kbias + klen > n)
 		klen = n - kbias;
 	
+	MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
 	// part 1: <, <, <
-	for(i2 = 0; i2 < ilen; ++i2){
-		itmp = bias_x + i2;
-		for(j = 0; j < jlen; ++j){
-			jtmp = bias_y + j;
-			Dist_ij2[i2 * end_y + j] = Dist[itmp][jtmp];
-		}
-	}
-	// part 5: <, <, <
-	for(k = 0; k < klen; ++k){
-		ktmp = k + kbias;
-		for(j = 0; j < jlen; ++j){
-			jtmp = bias_y + j;
-			Dist_kj2[k * end_y + j] = Dist[ktmp][jtmp];
-		}
+	if(rank ==0){
 		for(i2 = 0; i2 < ilen; ++i2){
-			itmp = bias_x + i2;
-			Dist_ik2[i2 * B + k] = Dist[itmp][ktmp];
+			itmp = (bias_x + i2) *n +bias_y;
+			for(j = 0; j < jlen; ++j)
+				Dist_ij2[i2 * end_y + j] = Dist[itmp + j];
+			itmp += kbias-bias_y;
+			for(k = 0; k < klen; ++k)
+				Dist_ik2[i2 * B + k] = Dist[itmp +k];
+		}
+		// part 5: <, <, <
+		for(k = 0; k < klen; ++k){
+			ktmp = (kbias + k) *n +bias_y;
+			for(j = 0; j < jlen; ++j)
+				Dist_kj2[k * end_y + j] = Dist[ktmp + j];
 		}
 	}
+	else{
+		for(i2 = 0; i2 < ilen; ++i2){
+			itmp = (bias_x + i2) *n;
+			MPI_Get(Dist_ij2 + i2 * end_y, jlen, MPI_INT, 0, itmp +bias_y, jlen, MPI_INT, win);
+			MPI_Get(Dist_ik2 + i2 *		B, klen, MPI_INT, 0, itmp + kbias, klen, MPI_INT, win);
+		}
+		// part 5: <, <, <
+		for(k = 0; k < klen; ++k){
+			ktmp = (kbias + k) *n +bias_y;
+			MPI_Get(Dist_kj2 + k  * end_y, jlen, MPI_INT, 0, 		ktmp, jlen, MPI_INT, win);
+		}
+	}
+	MPI_Win_unlock(0, win);
+	if(ilen == end_x && jlen == end_y && klen == B )
+		return;
 	// part 5-2: <, X, > ||  X, <, >
-	ktmp = klen - 1;
+	ktmp = klen -1;
 	jtmp = ktmp * end_y;
 	for(k = klen; k < B; ++k){
 		for(i2 = 0; i2 < ilen; ++i2){
@@ -235,7 +343,7 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 			Dist_ij2[i2 * end_y + j] = Dist_ij2[itmp];
 	
 	// part 5-3: >, X, > || X, >, >
-	itmp = (ilen -1) * B + (klen -1);
+	itmp = (ilen -1) * B + ktmp;
 	jtmp += jlen -1;//(klen -1) * end_y + (jlen -1);
 	for(k = klen; k < B; ++k){
 		for(i2 = ilen; i2 < end_x; ++i2)
@@ -244,7 +352,7 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 			Dist_kj2[k * end_y + j] = Dist_kj2[jtmp];
 	}
 	// part 5-4: >, X, < || X, <, <
-	itmp -= klen -1;//(ilen -1) * B ;
+	itmp -= ktmp;//(ilen -1) * B ;
 	jtmp = jlen -1;
 	for(k = 0; k < klen; ++k){
 		ktmp = k * end_y;
@@ -259,9 +367,10 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 		for(j = jlen; j < end_y; ++j)
 			Dist_ij2[itmp + j] = Dist_ij2[itmp + jtmp];
 	}
-	
+		
 	
 }
+
 
 void putToDist(int round, int bias_x, int bias_y, 
 	int block_height, int block_width,
@@ -274,31 +383,39 @@ void putToDist(int round, int bias_x, int bias_y,
 	int jlen = end_y;
 	bias_x *= B;
 	bias_y *= B;
-	if(end_x + bias_x > n)// if [ind_end+1] > n, change,if == ,no c
+	if(end_x + bias_x > n)
 		ilen = n - bias_x;
 	if(end_y + bias_y > n)
 		jlen = n - bias_y;
-	
-	for(int i = 0; i < ilen; ++i){
-		itmp = bias_x + i;
-		for(int j = 0; j < jlen; ++j){
-			jtmp = bias_y + j;
-			Dist[itmp][jtmp] = Dist_ij[i * end_y + j];
+	MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
+	if(rank==0){
+		for(int i = 0; i < ilen; ++i){
+			itmp = bias_x + i;
+			for(int j = 0; j < jlen; ++j){
+				jtmp = bias_y + j;
+				Dist[itmp *n +jtmp] = Dist_ij[i * end_y + j];
+			}
 		}
 	}
+	else{
+		for(int i = 0; i < ilen; ++i){
+			itmp = (bias_x + i)*n + bias_y ;
+			MPI_Put(Dist_ij + i *end_y, jlen, MPI_INT, 0, itmp , jlen, MPI_INT, win);
+		}
+	}
+	MPI_Win_unlock(0, win);
 }
-
-void callP1(int r){
+void callP1(int w_r){
 	
 	int shm_size = sizeof(int) * B * B;
 	dim3 blocksPerGrif1(1, 1);
 	dim3 threadsPerBlock(B, B);
 	
+	cudaError_t err;
 	int *Dist_ij;
-	cudaError_t err = cudaMallocHost(&Dist_ij, shm_size );
-	if (err != 0)	printf("malloc Dist_ij error\n");
-	putInAij( r, Dist_ij);
-	
+	err = cudaMallocHost(&Dist_ij, shm_size );
+	if (err != 0)	printf("[%d]malloc Dist_ij error\n", rank);
+	putInAij(w_r, Dist_ij);
 	int *Dist_ijg;
 	
 	//step 1: declare
@@ -310,12 +427,12 @@ void callP1(int r){
 		(Dist_ijg);
 	//step 3: get return
 	cudaMemcpy(Dist_ij, Dist_ijg, shm_size, cudaMemcpyDeviceToHost);
+	
+	putToDist(w_r, w_r, w_r,
+		1, 1, Dist_ij);
 	//step 4: free gpu
 	cudaFree(Dist_ijg);
-	putToDist(r, r, r, 1, 1, Dist_ij);
-	
 	cudaFreeHost(Dist_ij);
-	
 }
 void callP2(int r, 
 int *block_start_x, int *block_start_y, 
@@ -325,25 +442,71 @@ int *block_height, int *block_width){
 	dim3 threadsPerBlock(B, B);
 	const int str_num = 4;
 	cudaStream_t stream[str_num];
-	for(int i = 0; i < str_num; i++)
-		cudaStreamCreate(&stream[i]);
 	int *Dist_all[str_num *6];// pointer array
 	cudaError_t err;
-	for(int i = 0; i < str_num; ++i){
-		if( block_height[i] == 0 || block_width[i] == 0)
+	int i;
+	int ibias = size;
+	//*
+	if(size==2){
+		if(rank==0)
+			ibias++;
+		else
+			ibias--;
+	}
+	//*/
+	for(i = rank; i < str_num; i += ibias){
+		if( block_height[i] == 0 || block_width[i] == 0 || i > 3)
 			continue;
+		cudaStreamCreate(&stream[i]);
 		dim3 blocksPerGrif1( block_height[i], block_width[i]);
 		int *Dist_ij2, *Dist_ik2, *Dist_kj2;
 		
 		err = cudaMallocHost(&Dist_ij2, shm_size * block_height[i] * block_width[i]);
-		if (err != 0)	printf("malloc Dist_ij2 error\n");
+		if (err != 0)	printf("[%d]malloc Dist_ij2 error\n", rank);
 		err = cudaMallocHost(&Dist_ik2, shm_size * block_height[i]);
-		if (err != 0)	printf("malloc Dist_ik2 error\n");
+		if (err != 0)	printf("[%d]malloc Dist_ik2 error\n", rank);
 		err = cudaMallocHost(&Dist_kj2, shm_size * block_width[i]);
-		if (err != 0)	printf("malloc Dist_kj2 error\n");
+		if (err != 0)	printf("[%d]malloc Dist_kj2 error\n", rank);
 		putDistInArray_new(r, block_start_x[i], block_start_y[i], 
 			block_height[i], block_width[i], Dist_ij2, Dist_ik2, Dist_kj2);
-		
+		/*
+		end_x = block_height[i] * B;
+		end_y = block_width[i] * B;
+		bias_x = block_start_x[i] *B;
+		bias_y = block_start_y[i] *B;
+		//為何要重新歷過一遍?比原本的還慢!!
+		//因要解決IO問題，不想直接IO全部
+		//真的有比較差??不是被"資源利用率"騙到?(IO全部VS處理完再IO部分)
+		for(i2 = 0; i2 < end_x; ++i2){
+			itmp = bias_x + i2;
+			if(itmp >= n)
+				itmp = n -1;
+			for(j = 0; j < end_y; ++j){
+				jtmp = bias_y + j;
+				if(jtmp >= n)
+					jtmp = n -1;
+				Dist_ij2[i2 * end_y + j] = Dist[itmp *n +jtmp];
+			}
+			for(k = 0; k < B; ++k){
+				ktmp = k + kbias;
+				if(ktmp >= n)
+					ktmp = n -1;
+				Dist_ik2[i2 * B + k] = Dist[itmp *n +ktmp];
+			}
+		}
+		for(int k = 0; k < B; ++k){
+			ktmp = k + kbias;
+			if(ktmp >= n)
+				ktmp = n -1;
+			for(int j = 0; j < end_y; ++j){
+				jtmp = bias_y + j;
+				if(jtmp >= n)
+					jtmp = n -1;
+				Dist_kj2[k * end_y + j] = Dist[ktmp *n +jtmp];
+			}
+		}
+		*/
+	
 		Dist_all[i *6] = Dist_ij2;
 		Dist_all[i *6 +1] = Dist_ik2;
 		Dist_all[i *6 +2] = Dist_kj2;
@@ -370,8 +533,8 @@ int *block_height, int *block_width){
 			cudaMemcpyDeviceToHost, stream[i]);
 	}
 	//wait for stream
-	for(int i = 0; i < str_num; i++){
-		if( block_height[i] == 0 || block_width[i] == 0)
+	for(i = rank; i < str_num; i += ibias){
+		if( block_height[i] == 0 || block_width[i] == 0 || i > 3)
 			continue;
 		cudaStreamSynchronize(stream[i]);
 		putToDist(r, block_start_x[i], block_start_y[i],
@@ -388,7 +551,6 @@ int *block_height, int *block_width){
 		
 	}
 }
-
 __global__ void cal_Pone(int* Dist_ij)
 {
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -403,7 +565,7 @@ __global__ void cal_Pone(int* Dist_ij)
 			DS[dsbias] = DS[i * blockDim.x + k] + DS[k * offset_j + j];
 		__syncthreads();
 	}
-	Dist_ij[i * offset_j + j] = DS[dsbias];// save value to shared memory
+	Dist_ij[i * offset_j + j] = DS[dsbias];// save value from shared memory
 	__syncthreads();
 	
 }

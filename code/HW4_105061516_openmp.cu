@@ -104,10 +104,10 @@ void block_FW()
 {
 	int round = ceil(n, B);
 	
-	/* Phase 1*/
-	callP1(round);
 	
 	for (int r = 0; r < round; ++r) {
+		/* Phase 1*/
+		callP1(r);
 		/* Phase 2*/
 		//printf("This is Phase 2\n");
 		int block_start_x[4] = {r,		r, 0,	r + 1};
@@ -129,18 +129,52 @@ void block_FW()
 
 }
 
-void putDistInArray(int round, int bias_x, int bias_y, 
-	int block_height, int block_width,
-	int* Dist_ij, int* Dist_ik, int* Dist_kj){
+void putInAij(int bias_y, int* Dist_ij){
 		
-	int shm_size = sizeof(int) * B * B;
-	cudaError_t err = cudaMallocHost(&Dist_ij, shm_size * block_height * block_width);
-	if (err != 0)	printf("malloc Dist_ij error\n");
-	err = cudaMallocHost(&Dist_ik, shm_size * block_height);
-	if (err != 0)	printf("malloc Dist_ik error\n");
-	err = cudaMallocHost(&Dist_kj, shm_size * block_width);
-	if (err != 0)	printf("malloc Dist_kj error\n");
-	int ktmp, itmp, jtmp, j, k;
+	int i, j;
+	bias_y *= B;
+	//為何要重新歷過一遍?比原本的還慢!!
+	//因要解決IO問題，不想直接IO全部
+	//真的有比較差??不是被"資源利用率"騙到?(IO全部VS處理完再IO部分)
+
+	int jlen = B;
+	int itmp ;
+	int jtmp ;
+	// b+j > n
+	if(bias_y + jlen > n)
+		jlen = n - bias_y;
+	// part 1: <, <
+	for(i = 0; i < jlen; ++i){
+		itmp = bias_y + i;
+		for(j = 0; j < jlen; ++j){
+			jtmp = bias_y + j;
+			Dist_ij[i * B + j] = Dist[itmp][jtmp];
+		}
+	}
+	itmp = (jlen -1) * B;
+	// part 3: >, <=
+	for(i = jlen; i < B; ++i)
+		for(j = 0; j < jlen; ++j)
+			Dist_ij[i * B + j] = Dist_ij[itmp + j];
+	// part 2: >, >
+	jtmp += jlen -1;//(jlen -1) *B + (jlen -1);
+	for(i = jlen; i < B; ++i)
+		for(j = jlen; j < B; ++j)
+			Dist_ij[i * B + j] = Dist_ij[jtmp];
+	// part 4: <=, >
+	jtmp = (jlen -1);
+	for(i = 0; i < jlen; ++i){
+		itmp = i *B;
+		for(j = jlen; j < B; ++j){
+			Dist_ij[itmp + j] = Dist_ij[itmp + jtmp];
+		}
+	}
+}
+void putDistInArray_new(int round, int bias_x, int bias_y, 
+	int block_height, int block_width,
+	int* Dist_ij2, int* Dist_ik2, int* Dist_kj2){
+		
+	int itmp, jtmp, ktmp, i2, j, k;
 	int kbias = round * B;
 	int end_x = block_height * B;
 	int end_y = block_width * B;
@@ -149,34 +183,88 @@ void putDistInArray(int round, int bias_x, int bias_y,
 	//為何要重新歷過一遍?比原本的還慢!!
 	//因要解決IO問題，不想直接IO全部
 	//真的有比較差??不是被"資源利用率"騙到?(IO全部VS處理完再IO部分)
-	for(int i = 0; i < end_x; ++i){
-		itmp = bias_x + i;
-		if(itmp >= n)
-			itmp = n - 1;
-		for(j = 0; j < end_y; ++j){
+	int ilen = end_x;
+	int jlen = end_y;
+	int klen = B;
+	// b+i2 > n
+	if(bias_x + ilen > n)
+		ilen = n - bias_x;
+	// b+j > n
+	if(bias_y + jlen > n)
+		jlen = n - bias_y;
+	// b+j > n
+	if(kbias + klen > n)
+		klen = n - kbias;
+	
+	// part 1: <, <, <
+	for(i2 = 0; i2 < ilen; ++i2){
+		itmp = bias_x + i2;
+		for(j = 0; j < jlen; ++j){
 			jtmp = bias_y + j;
-			if(jtmp >= n)
-				jtmp = n - 1;
-			Dist_ij[i * end_y + j] = Dist[itmp][jtmp];
-		}
-		for(k = 0; k < B; ++k){
-			ktmp = k + kbias;
-			if(ktmp >= n)
-				ktmp = n - 1;
-			Dist_ik[i * B + k] = Dist[itmp][ktmp];
+			Dist_ij2[i2 * end_y + j] = Dist[itmp][jtmp];
 		}
 	}
-	for(int k = 0; k < B; ++k){
+	// part 5: <, <, <
+	for(k = 0; k < klen; ++k){
 		ktmp = k + kbias;
-		if(ktmp >= n)
-			ktmp = n - 1;
-		for(int j = 0; j < end_y; ++j){
+		for(j = 0; j < jlen; ++j){
 			jtmp = bias_y + j;
-			if(jtmp >= n)
-				jtmp = n - 1;
-			Dist_kj[k * end_y + j] = Dist[ktmp][jtmp];
+			Dist_kj2[k * end_y + j] = Dist[ktmp][jtmp];
+		}
+		for(i2 = 0; i2 < ilen; ++i2){
+			itmp = bias_x + i2;
+			Dist_ik2[i2 * B + k] = Dist[itmp][ktmp];
 		}
 	}
+	// part 5-2: <, X, > ||  X, <, >
+	ktmp = klen - 1;
+	jtmp = ktmp * end_y;
+	for(k = klen; k < B; ++k){
+		for(i2 = 0; i2 < ilen; ++i2){
+			itmp = i2 * B;
+			Dist_ik2[itmp+ k] = Dist_ik2[itmp + ktmp];
+		}
+		for(j = 0; j < jlen; ++j)
+			Dist_kj2[k * end_y + j] = Dist_kj2[jtmp + j];
+	}
+	// part 3: >, <, X
+	itmp = (ilen -1) *end_y;
+	for(i2 = ilen; i2 < end_x; ++i2)
+		for(j = 0; j < jlen; ++j)
+			Dist_ij2[i2 * end_y + j] = Dist_ij2[itmp + j];
+	// part 2: >, >, X
+	itmp += jlen -1;//(ilen -1) * end_y + (jlen -1);
+	for(i2 = ilen; i2 < end_x; ++i2)
+		for(j = jlen; j < end_y; ++j)
+			Dist_ij2[i2 * end_y + j] = Dist_ij2[itmp];
+	
+	// part 5-3: >, X, > || X, >, >
+	itmp = (ilen -1) * B + (klen -1);
+	jtmp += jlen -1;//(klen -1) * end_y + (jlen -1);
+	for(k = klen; k < B; ++k){
+		for(i2 = ilen; i2 < end_x; ++i2)
+			Dist_ik2[i2 * B + k] = Dist_ik2[itmp];
+		for(j = jlen; j < end_y; ++j)
+			Dist_kj2[k * end_y + j] = Dist_kj2[jtmp];
+	}
+	// part 5-4: >, X, < || X, <, <
+	itmp -= klen -1;//(ilen -1) * B ;
+	jtmp = jlen -1;
+	for(k = 0; k < klen; ++k){
+		ktmp = k * end_y;
+		for(i2 = ilen; i2 < end_x; ++i2)
+			Dist_ik2[i2 * B + k] = Dist_ik2[itmp + k];
+		for(j = jlen; j < end_y; ++j)
+			Dist_kj2[ktmp + j] = Dist_kj2[ktmp + jtmp];
+	}
+	// part 4: <, >, X
+	for(i2 = 0; i2 < ilen; ++i2){
+		itmp = i2 * end_y;
+		for(j = jlen; j < end_y; ++j)
+			Dist_ij2[itmp + j] = Dist_ij2[itmp + jtmp];
+	}
+	
+	
 }
 void putToDist(int round, int bias_x, int bias_y, 
 	int block_height, int block_width,
@@ -185,13 +273,19 @@ void putToDist(int round, int bias_x, int bias_y,
 	int itmp, jtmp;
 	int end_x = block_height * B;
 	int end_y = block_width * B;
+	int ilen = end_x;
+	int jlen = end_y;
 	bias_x *= B;
 	bias_y *= B;
-	for(int i = 0; i < end_x; ++i){
+	if(ilen + bias_x > n)
+		ilen = n - bias_x;
+	if(jlen + bias_y > n)
+		jlen = n - bias_y;
+	for(int i = 0; i < ilen; ++i){
 		itmp = bias_x + i;
 		if(itmp >= n)
 			break;
-		for(int j = 0; j < end_y; ++j){
+		for(int j = 0; j < jlen; ++j){
 			jtmp = bias_y + j;
 			if(jtmp >= n)
 				break;
@@ -199,84 +293,38 @@ void putToDist(int round, int bias_x, int bias_y,
 		}
 	}
 }
-void callP1(int round){
+void callP1(int i){
 	
 	int shm_size = sizeof(int) * B * B;
 	dim3 blocksPerGrif1(1, 1);
 	dim3 threadsPerBlock(B, B);
 	
-	/*
-	round = ceil(n,numDevs *B));
-	#pragma omp parallel num_threads(numDevs)
-	if (cudaSetDevice(omp_get_thread_num()) == cudaSuccess)
-	{
-		for(int i = 0; i < round; i++)
-		if( i *round *numDevs > n)
-			continue;
-		dim3 dimBlock(32,16);
-		dim3 dimGrid(65535,65535);
-		kernel<<<dimGrid,dimBlock>>>();
-		cudaThreadExit();
-	}
-	//*/
-	cudaStream_t stream[round];
-	int *Dist_all[round * 2];// pointer array
-	int i;
-	int thread_id[round];
-	#pragma omp parallel shared(round, shm_size, blocksPerGrif1, threadsPerBlock, stream, Dist_all, i, thread_id) num_threads(numDevs)
-	{
-	int itmp, jtmp, bias_y, i2, j;
+	//int itmp, jtmp, bias_y, i2, j;
 	cudaError_t err ;
-	#pragma omp for schedule(dynamic)
-	for(i = 0; i < round; ++i){
-		thread_id[i] = omp_get_thread_num();
-		cudaSetDevice(thread_id[i]);
-		cudaStreamCreate(&stream[i]);
-		int *Dist_ij;
-		err = cudaMallocHost(&Dist_ij, shm_size * 1 * 1);
-		if (err != 0)	printf("malloc Dist_ij error\n");
-		bias_y = i * B;
-		for(i2 = 0; i2 < B; ++i2){
-			itmp = bias_y + i2;
-			if(itmp >= n)
-				itmp = n - 1;
-			for(j = 0; j < B; ++j){
-				jtmp = bias_y + j;
-				if(jtmp >= n)
-					jtmp = n - 1;
-				Dist_ij[i2 * B + j] = Dist[itmp][jtmp];
-			}
-		}
-		Dist_all[i *2 ] = Dist_ij;
-		int *Dist_ijg;
+	cudaSetDevice(i%2);
+	int *Dist_ij;
+	err = cudaMallocHost(&Dist_ij, shm_size );
+	if (err != 0)	printf("malloc Dist_ij error\n");
+	putInAij( i, Dist_ij);
 		
-		//step 1: declare
-		cudaMalloc((void **)&Dist_ijg, shm_size);
-		Dist_all[i *2 +1] = Dist_ijg;
-		//step 2: copy
-		cudaMemcpyAsync(Dist_ijg, Dist_ij, shm_size, cudaMemcpyHostToDevice, stream[i]);
-		
-		cal_Pone<<< blocksPerGrif1 , threadsPerBlock , shm_size>>> 
-			(Dist_ijg);
-		//step 3: get return
-		cudaMemcpyAsync(Dist_ij, Dist_ijg, shm_size, cudaMemcpyDeviceToHost, stream[i]);
-	}
-	}
-	//wait for stream
-	#pragma omp parallel for shared(round, stream, Dist_all, i) num_threads(numDevs) schedule(dynamic)
-	for(i = 0; i < round; i++){
-		cudaSetDevice(thread_id[i]);
-		cudaStreamSynchronize(stream[i]);
-		putToDist(i, i, i,
-			1, 1, Dist_all[i *2]);
-		//step 4: free gpu
-		cudaFree(Dist_all[i *2]);
-		cudaFreeHost(Dist_all[i *2 +1]);
-			
-		cudaStreamDestroy(stream[i]);
-		
-	}
+	int *Dist_ijg;
 	
+	//step 1: declare
+	cudaMalloc((void **)&Dist_ijg, shm_size);
+	//step 2: copy
+	cudaMemcpy(Dist_ijg, Dist_ij, shm_size, cudaMemcpyHostToDevice);
+	
+	cal_Pone<<< blocksPerGrif1 , threadsPerBlock , shm_size>>> 
+		(Dist_ijg);
+	//step 3: get return
+	cudaMemcpy(Dist_ij, Dist_ijg, shm_size, cudaMemcpyDeviceToHost);
+	putToDist(i, i, i,
+		1, 1, Dist_ij);
+	//step 4: free gpu
+	cudaFree(Dist_ijg);
+	cudaFreeHost(Dist_ij);
+		
+		
 }
 void callP2(int r, 
 int *block_start_x, int *block_start_y, 
@@ -287,15 +335,15 @@ int *block_height, int *block_width){
 	const int str_num = 4;
 	cudaStream_t stream[str_num];
 	int *Dist_all[str_num *6];// pointer array
-	int kbias = r * B;
+	//int kbias = r * B;
 	int i;
 	int thread_id[str_num];
-	#pragma omp parallel shared( shm_size, threadsPerBlock, stream, Dist_all, kbias, i, thread_id) num_threads(numDevs) 
+	#pragma omp parallel shared( shm_size, threadsPerBlock, stream, Dist_all, i, thread_id) num_threads(numDevs) 
 	{
-	int ktmp, itmp, jtmp, i2, j, k, bias_x, bias_y, end_x, end_y;
+	//int ktmp, itmp, jtmp, i2, j, k, bias_x, bias_y, end_x, end_y;
 	cudaError_t err;
 	#pragma omp for schedule(dynamic)
-	for(int i = 0; i < str_num; ++i){
+	for(i = 0; i < str_num; ++i){
 		if( block_height[i] == 0 || block_width[i] == 0)
 			continue;
 		thread_id[i] = omp_get_thread_num();
@@ -303,8 +351,6 @@ int *block_height, int *block_width){
 		cudaStreamCreate(&stream[i]);
 		dim3 blocksPerGrif1( block_height[i], block_width[i]);
 		int *Dist_ij2, *Dist_ik2, *Dist_kj2;
-		//putDistInArray(r, B, block_start_x[i], block_start_y[i], 
-		//	block_height[i], block_width[i], Dist_ij2, Dist_ik2, Dist_kj2);
 		
 		err = cudaMallocHost(&Dist_ij2, shm_size * block_height[i] * block_width[i]);
 		if (err != 0)	printf("malloc Dist_ij2 error\n");
@@ -312,6 +358,10 @@ int *block_height, int *block_width){
 		if (err != 0)	printf("malloc Dist_ik2 error\n");
 		err = cudaMallocHost(&Dist_kj2, shm_size * block_width[i]);
 		if (err != 0)	printf("malloc Dist_kj2 error\n");
+		
+		putDistInArray_new(r, block_start_x[i], block_start_y[i], 
+			block_height[i], block_width[i], Dist_ij2, Dist_ik2, Dist_kj2);
+		/*
 		end_x = block_height[i] * B;
 		end_y = block_width[i] * B;
 		bias_x = block_start_x[i] *B;
@@ -346,7 +396,7 @@ int *block_height, int *block_width){
 					jtmp = n -1;
 				Dist_kj2[k * end_y + j] = Dist[ktmp][jtmp];
 			}
-		}
+		}*/
 	
 		Dist_all[i *6] = Dist_ij2;
 		Dist_all[i *6 +1] = Dist_ik2;
@@ -377,7 +427,7 @@ int *block_height, int *block_width){
 	//wait for stream
 	// private(  j, tt2 )
 	#pragma omp parallel for shared(block_start_x, block_start_y, block_height, block_width, stream, Dist_all, i, thread_id) num_threads(numDevs) schedule(dynamic)
-	for(int i = 0; i < str_num; i++){
+	for(i = 0; i < str_num; i++){
 		if( block_height[i] == 0 || block_width[i] == 0)
 			continue;
 		cudaSetDevice(thread_id[i]);
