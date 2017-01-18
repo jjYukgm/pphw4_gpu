@@ -13,7 +13,7 @@ int ceil(int a, int b);
 void callP1(int round);
 void callP2(int r, 
 int *block_start_x, int *block_start_y, 
-int *block_height, int *block_width);
+int *block_height, int *block_width, int phase);
 __global__ void cal_Pone(int* Dist_ij);
 __global__ void cal_Ptwo(int* Dist_ij, int* Dist_ik, int* Dist_kj);
 
@@ -143,7 +143,7 @@ void block_FW()
 		int block_height[4] = {1, 				1, r,	round - r - 1};
 		int block_width[4] = {r,	round - r - 1, 1, 				1};
 		callP2(r, block_start_x, block_start_y,
-			block_height, block_width);
+			block_height, block_width, 2);
 		/* hase 3*/
 		//printf("[%d][%d]This is Phase 3\n", rank, r);
 		int block_start_x2[4] = {0, 	0,	r + 1, r + 1};
@@ -151,11 +151,12 @@ void block_FW()
 		int block_height2[4] = {r, r,	round - r -1,	round - r -1};
 		int block_width2[4] = {r,	round - r -1, r,	round - r -1};
 		callP2(r, block_start_x2, block_start_y2,
-			block_height2, block_width2);
+			block_height2, block_width2, 3);
 		//printf("End one turn\n");
+		MPI_Barrier(MPI_COMM_WORLD);
 	}
-	/* Phase 1*/
-	callP1(round);
+	///* Phase 1*/
+	//callP1(round);
 
 }
 
@@ -224,18 +225,16 @@ void putInAij(int bias_y, int* Dist_ij){
 		jlen = n - bias_y;
 	// part 1: <, <
 	if(rank ==0){
-		MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
 		for(i = 0; i < jlen; ++i){
 			itmp = (bias_y + i)*n +bias_y;
 			for(j = 0; j < jlen; ++j)
 				Dist_ij[i * B + j] = Dist[itmp +j];
 		}
-		MPI_Win_unlock(0, win);
 	}
 	else{
 		for(i = 0; i < jlen; ++i){
 			itmp = (bias_y + i) *n +bias_y;
-			MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
+			MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, win);
 			MPI_Get(Dist_ij + i *B, jlen, MPI_INT, 0, itmp , jlen, MPI_INT, win);
 			MPI_Win_unlock(0, win);
 		}
@@ -287,7 +286,6 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 	if(kbias + klen > n)
 		klen = n - kbias;
 	
-	MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
 	// part 1: <, <, <
 	if(rank ==0){
 		for(i2 = 0; i2 < ilen; ++i2){
@@ -308,16 +306,19 @@ void putDistInArray_new(int round, int bias_x, int bias_y,
 	else{
 		for(i2 = 0; i2 < ilen; ++i2){
 			itmp = (bias_x + i2) *n;
+			MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, win);
 			MPI_Get(Dist_ij2 + i2 * end_y, jlen, MPI_INT, 0, itmp +bias_y, jlen, MPI_INT, win);
 			MPI_Get(Dist_ik2 + i2 *		B, klen, MPI_INT, 0, itmp + kbias, klen, MPI_INT, win);
+			MPI_Win_unlock(0, win);
 		}
 		// part 5: <, <, <
 		for(k = 0; k < klen; ++k){
 			ktmp = (kbias + k) *n +bias_y;
+			MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, win);
 			MPI_Get(Dist_kj2 + k  * end_y, jlen, MPI_INT, 0, 		ktmp, jlen, MPI_INT, win);
+			MPI_Win_unlock(0, win);
 		}
 	}
-	MPI_Win_unlock(0, win);
 	if(ilen == end_x && jlen == end_y && klen == B )
 		return;
 	// part 5-2: <, X, > ||  X, <, >
@@ -387,7 +388,6 @@ void putToDist(int round, int bias_x, int bias_y,
 		ilen = n - bias_x;
 	if(end_y + bias_y > n)
 		jlen = n - bias_y;
-	MPI_Win_lock(MPI_LOCK_EXCLUSIVE, 0, 0, win);
 	if(rank==0){
 		for(int i = 0; i < ilen; ++i){
 			itmp = bias_x + i;
@@ -400,10 +400,11 @@ void putToDist(int round, int bias_x, int bias_y,
 	else{
 		for(int i = 0; i < ilen; ++i){
 			itmp = (bias_x + i)*n + bias_y ;
+			MPI_Win_lock(MPI_LOCK_SHARED, 0, 0, win);// MPI_LOCK_EXCLUSIVE
 			MPI_Put(Dist_ij + i *end_y, jlen, MPI_INT, 0, itmp , jlen, MPI_INT, win);
+			MPI_Win_unlock(0, win);
 		}
 	}
-	MPI_Win_unlock(0, win);
 }
 void callP1(int w_r){
 	
@@ -436,7 +437,7 @@ void callP1(int w_r){
 }
 void callP2(int r, 
 int *block_start_x, int *block_start_y, 
-int *block_height, int *block_width){
+int *block_height, int *block_width, int phase){
 	
 	int shm_size = sizeof(int) * B * B;
 	dim3 threadsPerBlock(B, B);
@@ -447,7 +448,7 @@ int *block_height, int *block_width){
 	int i;
 	int ibias = size;
 	//*
-	if(size==2){
+	if(phase == 3 &&size==2){
 		if(rank==0)
 			ibias++;
 		else
